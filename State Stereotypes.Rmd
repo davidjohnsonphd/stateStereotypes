@@ -1,0 +1,234 @@
+---
+title: "State variability in racial stereotypes"
+output: 
+  html_document:
+    toc: true
+---
+  
+# Description of Data
+This script performs a state-level regression predicting state-level variation in the stereotype that Black Americans are violent as a function of state-level crime rate.
+  
+# Set-up environment
+
+## Import relevant libraries
+```{r installPackages, message = FALSE}
+library(ggplot2) # For general plotting
+library(usmap) # For making plots of US
+library(egg) # For multiple plots
+library(dplyr) # For data manipulation (part of tidyverse)
+library(tidyr) # For making tidy data (part of tidyverse)
+```
+
+## Import and clean data from the Uniform Crime Report (UCR)
+```{r loadData, results = "hide"}
+#Load 2006-2014 crime data Uniform Crime Report
+ucr <- read.csv("UCR06-14.csv")
+
+#Rename variables for easier coding
+names(ucr) <- c("state", "year", "offense", "white", "black")
+
+#Change offense variable into labeled factor 
+ucr$offense <- factor(ucr$offense, labels = c("murder", "assault"))
+
+#Recode state names, note FL doesn't provide data
+ucr$state <- as.numeric(gsub("[^[:digit:].]", "",  ucr$state)) #Regex to extract number
+ucr$stateAbb <- recode(ucr$state, '1' = "AL", '2' = "AZ", '3' = "AR", '4' = "CA", 
+  '5' = "CO", '6' = "CT", '7' = "DE", '8' = "DC", '9' = "FL", '10' = "GA", '11' = "ID", 
+  '12' = "IL", '13' = "IN", '14' = "IA", '15' = "KS", '16' = "KY", '17' = "LA", 
+  '18' = "ME", '19' = "MD", '20' = "MA", '21' = "MI", '22' = "MN", '23' = "MS", 
+  '24' = "MO", '25' = "MT", '26' = "NE", '27' = "NV", '28' = "NH", '29' = "NJ", 
+  '30' = "NM", '31' = "NY", '32' = "NC", '33' = "ND", '34' = "OH", '35' = "OK", 
+  '36' = "OR", '37' = "PA", '38' = "RI", '39' = "SC", '40' = "SD", '41' = "TN",
+  '42' = "TX", '43' = "UT", '44' = "VT", '45' = "VA", '46' = "WA", '47' = "WV", 
+  '48' = "WI", '49' = "WY", '50' = "AK", '51' = "HI") #state abbreviations
+```
+
+## Aggregate data to the state level
+```{r aggState, results = "hide"}
+#Pivot the data frame so that each line is one state
+ucr <- as.data.frame(ucr %>% #Using ucr data
+  group_by(stateAbb, offense) %>% #group by state and offense
+  summarize(W = sum(white), B = sum(black)) %>% #collapse across years
+  pivot_wider( #function to pivot the data
+    names_from =  c(offense), #crime type as column
+    values_from = c(W, B), #values from crime counts
+    names_sep = "") %>%
+  rename(murderW = Wmurder, assaultW = Wassault,
+    murderB = Bmurder, assaultB = Bassault))
+```
+
+## Load homicide and census data and merge
+```{r loadState, results = "hide"}
+#Import other state data, already aggregated for the sake of the example 
+state <- read.csv("stateData.csv")
+
+#Merge state-level data with crime data aggregated to the state level
+df <- merge(state, ucr, by = "stateAbb", all = T)
+```
+
+
+## Feature Manipulation
+```{r featureManip, message = FALSE}
+df$deathRateB <- round((df$deathsB / df$populationB)*100000, 3)
+df$assaultRateB <- round((df$assaultB / df$populationB)*100000, 3)
+df$murderRateB <- round((df$murderB / df$populationB)*100000, 3)
+df$deathRateW <- round((df$deathsW / df$populationW)*100000, 3)
+df$assaultRateW <- round((df$assaultW / df$populationW)*100000, 3)
+df$murderRateW <- round((df$murderW / df$populationW)*100000, 3)
+df$sexRatio <- round(df$male / df$female, 4)
+df$perWhite <- round(df$white / df$population2010, 4)
+
+#Convert state code to character for mapping
+df$fips <- as.character(df$fips)
+df$fips[1:7] <- c("01", "02", "04", "05", "06", "08", "09")
+```
+
+# Descriptives
+Survey asked whether respondents associated Whites or Blacks more with violence
+
+On a 1-7 scale, higher values indicate Blacks associated with violence
+
+1 = Whites violent, 4 = Neutral, 7 = Blacks violent
+
+```{r descriptives, message = FALSE}
+df[order(df$blackViolent, decreasing = T)[1:5], c("state", "blackViolent")] #highest
+df[order(df$blackViolent, decreasing = F)[1:5], c("state", "blackViolent")] #lowest
+```
+
+## Map of state variation
+```{r stateMap, message = FALSE}
+#Plot State variation in the Black violence stereotype
+expMap <- plot_usmap(regions = "states", #plot US states
+    data = df, #data frame is df
+    values = "blackViolent") + #Plot black-violence stereotype
+  ggtitle("Black Violence Stereotype by State") + 
+  scale_fill_continuous(low = "white", high = "dark red", limits = c(4.0, 4.5),
+    guide = "colorbar", name = "Stereotype") + 
+  theme(legend.position = "right", #"right"
+    legend.title = element_blank(), 
+    plot.title = element_text(hjust = .5))
+
+#Display plot
+expMap
+```
+
+# Regression Models
+
+Predictive model of state-level prejudice in the stereotype that Blacks are violent
+
+blackViolent measures how much Black (vs White) Americans associated with violence
+
+```{r regMurder, message = FALSE}
+
+contMod <- lm(scale(blackViolent) ~ scale(sexRatio) + scale(age) + scale(perWhite) + 
+  scale(income) + scale(bachelors) + scale(con), df) #control variables
+
+#Update model to add in key predictors (race-specific crime rate)
+fullMod <- update(contMod, ~ . + scale(murderRateB) + scale(murderRateW))
+
+#Examine model coefficients
+summary(fullMod)
+
+#Assess prediction quality
+round(summary(fullMod)$r.squared, 2) #Full model explains 58% of variance
+round(summary(fullMod)$r.squared - summary(contMod)$r.squared, 2) #9% more than control  
+```
+
+## Results with murder data
+ 
+In states with higher murder rates among White Americans, the Black-violent stereotype is weaker.
+
+In states with higher murder rates among Black Americans, the Black-violent stereotype is stronger.
+
+## Replication with homicide data
+
+Repeat model above but using a different proxy for crime
+
+Homicide rates as determined by CDC data
+
+Update model to add in key predictors (race-specific crime rate)
+
+```{r regHomicide, message = FALSE}
+fullMod2 <- update(contMod, ~ . + scale(deathRateB) + scale(deathRateW))
+
+summary(fullMod2)
+
+#Assess prediction quality
+round(summary(fullMod2)$r.squared, 2) #Full model explains 73% of variance
+round(summary(fullMod2)$r.squared - summary(contMod)$r.squared, 2) #24% more than control  
+```
+
+## Results with homicide data
+
+In states with higher homicide rates among White Americans, the Black-violent stereotype is weaker.
+
+In states with higher homicide rates among Black Americans, the Black-violent stereotype is stronger.
+
+## Plots of state correlations
+
+```{r statePlots, message = FALSE, warning = FALSE}
+deathW <- ggplot(df, aes(y = blackViolent, x = murderRateW, label = stateAbb)) + 
+  geom_text(aes(label = stateAbb), hjust = -.1, vjust = 0, size = 1.5) + 
+  geom_abline(intercept = coef(lm(blackViolent ~ deathRateW, data = df))[[1]], 
+    slope = coef(lm(blackViolent ~ deathRateW, data = df))[[2]]) +
+  ylab("Black-Violence Stereotype") + 
+  xlab("White Death Rate") + 
+  theme_bw(base_size = 10) + 
+  theme(
+    axis.title.y = element_text(hjust = .5),
+    axis.title.x = element_text(hjust = .5),
+    panel.background = element_blank(), 
+    panel.grid = element_blank(),
+    panel.border = element_rect(colour = "black", fill = NA, size = 1))
+
+deathB <- ggplot(df, aes(y = blackViolent, x = deathRateB, label = stateAbb)) + 
+  geom_text(aes(label = stateAbb), hjust = -.1, vjust = 0, size = 1.5) + 
+  geom_abline(intercept = coef(lm(blackViolent ~ murderRateB, data = df))[[1]], 
+    slope = coef(lm(blackViolent ~ deathRateB, data = df))[[2]]) +
+  ylab("Black-Violence Stereotype") + 
+  xlab("Black Death Rate") + 
+  theme_bw(base_size = 10) + 
+  theme(
+    axis.title.y = element_text(hjust = .5),
+    axis.title.x = element_text(hjust = .5),
+    panel.background = element_blank(), 
+    panel.grid = element_blank(),
+    panel.border = element_rect(colour = "black", fill = NA, size = 1))
+
+murderW <- ggplot(df, aes(y = blackViolent, x = murderRateW, label = stateAbb)) + 
+  geom_text(aes(label = stateAbb), hjust = -.1, vjust = 0, size = 1.5) + 
+  geom_abline(intercept = coef(lm(blackViolent ~ murderRateW, data = df))[[1]], 
+    slope = coef(lm(blackViolent ~ murderRateW, data = df))[[2]]) +
+  ylab("Black-Violence Stereotype") + 
+  xlab("White Murder Rate") + 
+  theme_bw(base_size = 10) + 
+  theme(
+    axis.title.y = element_text(hjust = .5),
+    axis.title.x = element_text(hjust = .5),
+    panel.background = element_blank(), 
+    panel.grid = element_blank(),
+    panel.border = element_rect(colour = "black", fill = NA, size = 1))
+
+murderB <- ggplot(df, aes(y = blackViolent, x = murderRateB, label = stateAbb)) + 
+  geom_text(aes(label = stateAbb), hjust = -.1, vjust = 0, size = 1.5) + 
+  geom_abline(intercept = coef(lm(blackViolent ~ murderRateB, data = df))[[1]], 
+    slope = coef(lm(blackViolent ~ murderRateB, data = df))[[2]]) +
+  ylab("Black-Violence Stereotype") + 
+  xlab("Black Murder Rate") + 
+  theme_bw(base_size = 10) + 
+  theme(
+    axis.title.y = element_text(hjust = .5),
+    axis.title.x = element_text(hjust = .5),
+    panel.background = element_blank(), 
+    panel.grid = element_blank(),
+    panel.border = element_rect(colour = "black", fill = NA, size = 1))
+
+#Multiple plots
+#Missing rows due to FL murder data not reported
+ggarrange(deathW, deathB, murderW, murderB, nrow = 2, ncol = 2)
+```
+
+
+
+
+
